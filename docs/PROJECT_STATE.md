@@ -1,6 +1,6 @@
 # Quick Notes — Project State
 
-**Status:** Phase 1 ✅ Complete | Phase 2 🚀 Starting  
+**Status:** Phase 1 ✅ Complete | Phase 2 ✅ Complete | Phase 3 🚀 Starting  
 **Created:** 2026-10-14  
 **Last Updated:** 2026-10-14
 
@@ -75,21 +75,30 @@
 
 ---
 
-## Phase 2: POC — Starting Now
+## Phase 2: POC ✅ Complete
 
 **Goal:** Scaffold Lambda + DynamoDB + React form. Get it running locally.
 
-**Checklist:**
-- [ ] Initialize Lambda handler (Express)
-- [ ] Initialize React app (Vite)
-- [ ] DynamoDB schema (single table: `notes`)
-- [ ] API endpoints: POST /notes, GET /notes, DELETE /notes/:id
-- [ ] React form + list view
-- [ ] LocalStack setup for local DynamoDB
-- [ ] `make test`, `make lint` pass
-- [ ] Single commit: "feat: quick-notes POC"
+**Completed:**
+- ✅ Backend: Express.js handler with CRUD operations
+- ✅ Frontend: React + TypeScript app with Vite
+- ✅ DynamoDB schema: single table `notes` (sessionId + noteId keys)
+- ✅ API endpoints: POST /notes, GET /notes, DELETE /notes/:id
+- ✅ React form with validation + list view
+- ✅ LocalStack docker-compose setup for local DynamoDB
+- ✅ Backend tests: 6/6 passing (validation logic)
+- ✅ Frontend build: Successful with Vite
+- ✅ Single commit: `feat: quick-notes POC` (47 files, 8982 insertions)
 
-**Next:** Check in once POC is working locally.
+**Deliverables:**
+- `/backend` — Express handler with TypeScript, 2 test files, ESLint config
+- `/frontend` — React app with API client, form, list view, styling
+- `/infrastructure` — SAM template for AWS deployment
+- `/localstack` — Docker setup for local DynamoDB testing
+- Root `/Makefile` — Orchestrates build, test, dev for both sides
+- Git repository initialized with POC commit
+
+**Status:** Ready for Phase 3.
 
 ---
 
