@@ -1,0 +1,85 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Quick Notes API - Lambda + DynamoDB
+
+Globals:
+  Function:
+    Timeout: 30
+    Runtime: nodejs24.x
+    Architectures:
+      - x86_64
+    Environment:
+      Variables:
+        NOTES_TABLE: !Ref NotesTable
+
+Resources:
+  NotesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: quick-notes
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: sessionId
+          AttributeType: S
+        - AttributeName: noteId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: sessionId
+          KeyType: HASH
+        - AttributeName: noteId
+          KeyType: RANGE
+      Tags:
+        - Key: Project
+          Value: quick-notes
+
+  NotesFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../backend/dist
+      Handler: handler.handler
+      Events:
+        CreateNote:
+          Type: Api
+          Properties:
+            RestApiId: !Ref NotesApi
+            Path: /notes
+            Method: POST
+        ListNotes:
+          Type: Api
+          Properties:
+            RestApiId: !Ref NotesApi
+            Path: /notes
+            Method: GET
+        DeleteNote:
+          Type: Api
+          Properties:
+            RestApiId: !Ref NotesApi
+            Path: /notes/{noteId}
+            Method: DELETE
+        HealthCheck:
+          Type: Api
+          Properties:
+            RestApiId: !Ref NotesApi
+            Path: /health
+            Method: GET
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref NotesTable
+
+  NotesApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: quick-notes-api
+      StageName: prod
+      Cors:
+        AllowMethods: "'GET,POST,DELETE,OPTIONS'"
+        AllowHeaders: "'Content-Type,X-Session-Id'"
+        AllowOrigin: "'*'"
+
+Outputs:
+  ApiEndpoint:
+    Description: API Gateway endpoint URL
+    Value: !Sub 'https://${NotesApi}.execute-api.${AWS::Region}.amazonaws.com/prod'
+  TableName:
+    Description: DynamoDB table name
+    Value: !Ref NotesTable
