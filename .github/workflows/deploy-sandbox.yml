@@ -1,0 +1,179 @@
+name: Deploy to Sandbox
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1
+  SAM_TEMPLATE: infrastructure/template.yaml
+  STACK_NAME: quick-notes-sandbox
+  LAMBDA_FUNCTION_NAME: quick-notes-api
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.x
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Build backend
+        working-directory: backend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build frontend
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: builds
+          path: |
+            backend/dist
+            frontend/dist
+
+  deploy-backend:
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: builds
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_SANDBOX_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup SAM CLI
+        uses: aws-actions/setup-sam@v2
+
+      - name: SAM Build
+        run: |
+          sam build --template-file ${{ env.SAM_TEMPLATE }} \
+            --region ${{ env.AWS_REGION }}
+
+      - name: SAM Deploy
+        run: |
+          sam deploy \
+            --no-confirm-changeset \
+            --no-fail-on-empty-changeset \
+            --stack-name ${{ env.STACK_NAME }} \
+            --region ${{ env.AWS_REGION }} \
+            --capabilities CAPABILITY_IAM \
+            --parameter-overrides \
+              Environment=sandbox \
+            --tags \
+              Project=quick-notes \
+              Environment=sandbox \
+              ManagedBy=GitHub
+
+      - name: Get Lambda API endpoint
+        id: lambda-info
+        run: |
+          API_ENDPOINT=$(aws apigateway get-rest-apis \
+            --region ${{ env.AWS_REGION }} \
+            --query "items[?name=='quick-notes-api'].id" \
+            --output text)
+          echo "api_endpoint=https://${API_ENDPOINT}.execute-api.${{ env.AWS_REGION }}.amazonaws.com/prod" >> $GITHUB_OUTPUT
+
+  deploy-frontend:
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download frontend build
+        uses: actions/download-artifact@v4
+        with:
+          name: builds
+          path: frontend
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_SANDBOX_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy to S3
+        run: |
+          aws s3 sync frontend/dist s3://quick-notes-sandbox-frontend \
+            --region ${{ env.AWS_REGION }} \
+            --delete \
+            --cache-control "max-age=3600"
+
+      - name: CloudFront cache invalidation
+        run: |
+          DISTRIBUTION_ID=$(aws cloudfront list-distributions \
+            --query "DistributionList.Items[?Comment=='quick-notes-sandbox'].Id" \
+            --output text)
+
+          if [ -n "$DISTRIBUTION_ID" ]; then
+            aws cloudfront create-invalidation \
+              --distribution-id $DISTRIBUTION_ID \
+              --paths "/*"
+          fi
+
+  smoke-tests:
+    runs-on: ubuntu-latest
+    needs: [deploy-backend, deploy-frontend]
+    if: success()
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.x
+
+      - name: Wait for Lambda to be ready
+        run: sleep 10
+
+      - name: Run smoke tests
+        env:
+          API_ENDPOINT: ${{ needs.deploy-backend.outputs.api_endpoint }}
+        run: |
+          node ./scripts/smoke-tests.js
+
+  post-deploy:
+    runs-on: ubuntu-latest
+    needs: [deploy-backend, deploy-frontend, smoke-tests]
+    if: always()
+
+    steps:
+      - name: Create deployment summary
+        run: |
+          echo "## 🚀 Sandbox Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Status:** ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Backend:** Lambda function deployed" >> $GITHUB_STEP_SUMMARY
+          echo "**Frontend:** Deployed to S3 + CloudFront" >> $GITHUB_STEP_SUMMARY
+          echo "**Tests:** Smoke tests passed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "[View in AWS Console](https://console.aws.amazon.com/)" >> $GITHUB_STEP_SUMMARY

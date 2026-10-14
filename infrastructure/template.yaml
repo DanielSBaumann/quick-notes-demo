@@ -1,6 +1,15 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
-Description: Quick Notes API - Lambda + DynamoDB
+Description: Quick Notes API - Lambda + DynamoDB + API Gateway
+
+Parameters:
+  Environment:
+    Type: String
+    Default: sandbox
+    AllowedValues:
+      - sandbox
+      - prod
+    Description: Environment name
 
 Globals:
   Function:
@@ -8,16 +17,23 @@ Globals:
     Runtime: nodejs24.x
     Architectures:
       - x86_64
+    MemorySize: 512
+    EphemeralStorage:
+      Size: 512
     Environment:
       Variables:
         NOTES_TABLE: !Ref NotesTable
+        AWS_REGION: !Ref AWS::Region
+        ENVIRONMENT: !Ref Environment
 
 Resources:
   NotesTable:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: quick-notes
+      TableName: !Sub 'quick-notes-${Environment}'
       BillingMode: PAY_PER_REQUEST
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
       AttributeDefinitions:
         - AttributeName: sessionId
           AttributeType: S
@@ -28,58 +44,178 @@ Resources:
           KeyType: HASH
         - AttributeName: noteId
           KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: expiresAt
+        Enabled: false
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: !If [IsProd, true, false]
       Tags:
         - Key: Project
           Value: quick-notes
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  NotesTableDynamoDBRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource: !GetAtt NotesTable.Arn
 
   NotesFunction:
     Type: AWS::Serverless::Function
     Properties:
+      FunctionName: !Sub 'quick-notes-api-${Environment}'
       CodeUri: ../backend/dist
-      Handler: handler.handler
-      Events:
-        CreateNote:
-          Type: Api
-          Properties:
-            RestApiId: !Ref NotesApi
-            Path: /notes
-            Method: POST
-        ListNotes:
-          Type: Api
-          Properties:
-            RestApiId: !Ref NotesApi
-            Path: /notes
-            Method: GET
-        DeleteNote:
-          Type: Api
-          Properties:
-            RestApiId: !Ref NotesApi
-            Path: /notes/{noteId}
-            Method: DELETE
-        HealthCheck:
-          Type: Api
-          Properties:
-            RestApiId: !Ref NotesApi
-            Path: /health
-            Method: GET
-      Policies:
-        - DynamoDBCrudPolicy:
-            TableName: !Ref NotesTable
+      Handler: handler.app
+      Role: !GetAtt NotesTableDynamoDBRole.Arn
+      Description: Quick Notes API Lambda function
+      Tags:
+        Project: quick-notes
+        Environment: !Ref Environment
 
   NotesApi:
     Type: AWS::Serverless::Api
     Properties:
-      Name: quick-notes-api
-      StageName: prod
+      Name: !Sub 'quick-notes-api-${Environment}'
+      StageName: !Ref Environment
+      TracingEnabled: true
+      MethodSettings:
+        - ResourcePath: '/**'
+          HttpMethod: '*'
+          LoggingLevel: INFO
+          DataTraceEnabled: true
+          MetricsEnabled: true
       Cors:
         AllowMethods: "'GET,POST,DELETE,OPTIONS'"
-        AllowHeaders: "'Content-Type,X-Session-Id'"
+        AllowHeaders: "'Content-Type,X-Session-Id,Authorization'"
         AllowOrigin: "'*'"
+        MaxAge: "'3600'"
+
+  NotesApiResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref NotesApi
+      ParentId: !GetAtt NotesApi.RootResourceId
+      PathPart: notes
+
+  HealthCheckResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref NotesApi
+      ParentId: !GetAtt NotesApi.RootResourceId
+      PathPart: health
+
+  PostNotesMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref NotesApi
+      ResourceId: !Ref NotesApiResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${NotesFunction.Arn}/invocations'
+
+  GetNotesMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref NotesApi
+      ResourceId: !Ref NotesApiResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${NotesFunction.Arn}/invocations'
+
+  DeleteNoteResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref NotesApi
+      ParentId: !Ref NotesApiResource
+      PathPart: '{noteId}'
+
+  DeleteNoteMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref NotesApi
+      ResourceId: !Ref DeleteNoteResource
+      HttpMethod: DELETE
+      AuthorizationType: NONE
+      RequestParameters:
+        method.request.path.noteId: true
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${NotesFunction.Arn}/invocations'
+
+  HealthCheckMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref NotesApi
+      ResourceId: !Ref HealthCheckResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${NotesFunction.Arn}/invocations'
+
+  NotesApiPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref NotesFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${NotesApi}/*/*'
+
+Conditions:
+  IsProd: !Equals [!Ref Environment, prod]
 
 Outputs:
   ApiEndpoint:
     Description: API Gateway endpoint URL
-    Value: !Sub 'https://${NotesApi}.execute-api.${AWS::Region}.amazonaws.com/prod'
+    Value: !Sub 'https://${NotesApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}'
+    Export:
+      Name: !Sub 'QuickNotesApi-${Environment}'
+
   TableName:
     Description: DynamoDB table name
     Value: !Ref NotesTable
+    Export:
+      Name: !Sub 'QuickNotesTable-${Environment}'
+
+  LambdaFunctionArn:
+    Description: Lambda function ARN
+    Value: !GetAtt NotesFunction.Arn
+    Export:
+      Name: !Sub 'QuickNotesFunction-${Environment}'
+
+  ApiId:
+    Description: API Gateway ID
+    Value: !Ref NotesApi
+    Export:
+      Name: !Sub 'QuickNotesApiId-${Environment}'
